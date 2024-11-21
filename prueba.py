@@ -97,40 +97,82 @@ class DistributionModel:
         m.u = Var(range(self.num_nodes), range(self.num_vehicles), domain=NonNegativeReals)
 
         # Función objetivo
-        def objective_rule(model):
-            return sum(
-                model.x[i, j, k] * self.distance_matrix[i, j] * self.cost_matrix[k, j]
+        def obj_expression(model):
+            # Costos de distancia
+            cost_distance = sum(
+                model.x[i, j, k] * self.distance_matrix[i, j] * self.cost_matrix[k, 1]
                 for i in range(self.num_nodes)
                 for j in range(self.num_nodes)
                 for k in range(self.num_vehicles)
-                if i != j
             )
-        m.objective = Objective(rule=objective_rule, sense=minimize)
-        print("función objetivo creada")
 
-        # Restricciones
-        m.constraints = ConstraintList()
+            # Costos de tiempo de viaje
+            cost_travel_time = sum(
+                model.x[i, j, k] * self.distance_matrix[i, j] / self.cost_matrix[k, 8] * self.cost_matrix[k, 4]
+                for i in range(self.num_nodes)
+                for j in range(self.num_nodes)
+                for k in range(self.num_vehicles)
+            )
+
+            # Costos de mantenimiento
+            cost_maintenance = sum(
+                self.cost_matrix[k, 5] * sum(model.x[i, j, k] for i in range(self.num_nodes) for j in range(self.num_nodes))
+                for k in range(self.num_vehicles)
+            )
+
+            # Costos de recarga/reabastecimiento
+            cost_recharge = sum(
+                model.x[i, j, k] * self.distance_matrix[i, j] * self.cost_matrix[k, 6]
+                for i in range(self.num_nodes)
+                for j in range(self.num_nodes)
+                for k in range(self.num_vehicles)
+            )
+
+            return cost_distance + cost_travel_time + cost_maintenance + cost_recharge
+
+        m.objective = Objective(rule=obj_expression, sense=minimize)
+
+        # Restricciones de entrada y salida
+        m.entry_constraints = ConstraintList()
+        m.exit_constraints = ConstraintList()
+        m.entry_exit_constraints = ConstraintList()
+
         for j in range(self.num_nodes):
             if j >= self.num_depots:  # Solo para clientes
-                m.constraints.add(sum(m.x[i, j, k] for i in range(self.num_nodes) for k in range(self.num_vehicles) if i != j) == 1)
-                m.constraints.add(sum(m.x[j, i, k] for i in range(self.num_nodes) for k in range(self.num_vehicles) if i != j) == 1)
-        
-        # Restricción de capacidad
+                m.entry_constraints.add(sum(m.x[i, j, k] for i in range(self.num_nodes) for k in range(self.num_vehicles) if i != j) == 1)
+                m.exit_constraints.add(sum(m.x[j, i, k] for i in range(self.num_nodes) for k in range(self.num_vehicles) if i != j) == 1)
+            else:  # Depots
+                m.entry_exit_constraints.add(
+                    sum(m.x[i, j, k] for i in range(self.num_nodes) for k in range(self.num_vehicles) if i != j) ==
+                    sum(m.x[j, i, k] for i in range(self.num_nodes) for k in range(self.num_vehicles) if i != j)
+                )
+
+        # Restricción de capacidad de vehículos
+        m.capacity_constraints = ConstraintList()
         for k in range(self.num_vehicles):
             for j in range(self.num_nodes):
-                if j >= self.num_depots:  # Solo para clientes
-                    m.constraints.add(
-                        sum(m.x[i, j, k] * self.clients['Demand'].iloc[j - self.num_depots] for i in range(self.num_nodes) if i != j) <= self.vehicles['Capacity'].iloc[k]
+                if j >= self.num_depots:
+                    m.capacity_constraints.add(
+                        sum(m.x[i, j, k] * self.demands[j] for i in range(self.num_nodes) if i != j) <= self.vehicles['Capacity'].iloc[k]
                     )
 
-        return m
-    print("restricciones creadas")
+        # Restricción de subtours (MTZ)
+        m.mtz_constraints = ConstraintList()
+        for k in range(self.num_vehicles):
+            for i in range(self.num_nodes):
+                for j in range(self.num_nodes):
+                    if i != j and i >= self.num_depots and j >= self.num_depots:
+                        m.mtz_constraints.add(m.u[i, k] - m.u[j, k] + self.num_nodes * m.x[i, j, k] <= self.num_nodes - 1)
 
+        # Inicialización de la variable MTZ para depósitos
+        for k in range(self.num_vehicles):
+            m.mtz_constraints.add(m.u[0, k] == 0)
+
+        return m
 
     def solve(self):
-        solver = SolverFactory('glpk')  # Ajustar según disponibilidad
+        solver = SolverFactory('highs')
         results = solver.solve(self.model)
-        print("solver")
         return results
 
     def plot_results(self):
